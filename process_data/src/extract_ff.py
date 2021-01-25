@@ -10,9 +10,8 @@ import argparse
 import glob
 
 
-def compute_TVL1(prev, curr, bound=20):
+def compute_TVL1(prev, curr, TVL1, bound=20):
     """Compute the TV-L1 optical flow."""
-    TVL1 = cv2.DualTVL1OpticalFlow_create()
     flow = TVL1.calc(prev, curr, None)
     flow = np.clip(flow, -bound, bound)
 
@@ -50,20 +49,23 @@ def extract_ff_opencv(v_path, frame_root, flow_root):
     if (width == 0) or (height==0): 
         print(width, height, v_path)
 
-    empty_img = 128 * np.ones((int(height),int(width),3)).astype(np.uint8)
+    empty_img = 128 * np.ones((int(height) // 4,int(width) // 4,3)).astype(np.uint8)
     success, image = vidcap.read()
     count = 1
 
-    pbar = tqdm(total=nb_frames)
+    TVL1 = cv2.optflow.DualTVL1OpticalFlow_create(warps=4)
+    # pbar = tqdm(total=nb_frames)
     while success:
         cv2.imwrite(os.path.join(frame_out_dir, 'image_%05d.jpg' % count), 
                     image, 
                     [cv2.IMWRITE_JPEG_QUALITY, 100]) # quality from 0-100, 95 is default, high is good
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        if count != 1:
-            flow = compute_TVL1(prev_gray, image_gray)
+        image_gray = cv2.resize(image_gray, (0,0), fx=0.25, fy=0.25)
+        if False:  # count != 1:
+            flow = compute_TVL1(prev_gray, image_gray, TVL1)
             flow_img = empty_img.copy()
             flow_img[:,:,0:2] = flow
+            flow_img = cv2.resize(flow_img, (0,0), fx=4, fy=4)
             cv2.imwrite(os.path.join(flow_out_dir, 'flow_%05d.jpg' % (count-1)),
                         flow_img,
                         [cv2.IMWRITE_JPEG_QUALITY, 100])
@@ -71,8 +73,8 @@ def extract_ff_opencv(v_path, frame_root, flow_root):
         prev_gray = image_gray 
         success, image = vidcap.read()
         count += 1
-        pbar.update(1)
-    
+        # pbar.update(1)
+
     if nb_frames > count:
         print(frame_out_dir, 'is NOT extracted successfully', nb_frames, count)
     vidcap.release()
@@ -150,16 +152,31 @@ def main_kinetics400(v_root, frame_root, flow_root):
                 (p, frame_root_real, flow_root_real) for p in tqdm(v_paths, total=len(v_paths))) 
 
 
+def main_CATER(v_root, frame_root, flow_root):
+    print('extracting CATER ... ')
+    print('extracting videos from %s' % v_root)
+    print('frame save to %s' % frame_root)
+    print('flow save to %s' % flow_root)
+
+    v_paths = glob.glob(os.path.join(v_root, '*.avi'))
+    v_paths = sorted(v_paths)
+    Parallel(n_jobs=8)(delayed(extract_ff_opencv)\
+        (p, frame_root, flow_root) for p in tqdm(v_paths, total=len(v_paths)))
+
+
 if __name__ == '__main__':
     # edit 'your_path' here: 
-    main_UCF101(v_root='your_path/UCF101/videos',
-                frame_root='your_path/UCF101/frame',
-                flow_root='your_path/UCF101/flow')
+    # main_UCF101(v_root='your_path/UCF101/videos',
+    #             frame_root='your_path/UCF101/frame',
+    #             flow_root='your_path/UCF101/flow')
 
-    main_HMDB51(v_root='your_path/HMDB51/videos',
-                frame_root='your_path/HMDB51/frame',
-                flow_root='your_path/HMDB51/flow')
+    # main_HMDB51(v_root='your_path/HMDB51/videos',
+    #             frame_root='your_path/HMDB51/frame',
+    #             flow_root='your_path/HMDB51/flow')
 
-    main_kinetics400(v_root='your_path/Kinetics400/videos',
-                frame_root='your_path/Kinetics400/frame',
-                flow_root='your_path/Kinetics400/flow')
+    # main_kinetics400(v_root='your_path/Kinetics400/videos',
+    #             frame_root='your_path/Kinetics400/frame',
+    #             flow_root='your_path/Kinetics400/flow')
+    main_CATER(v_root='/mnt/285EDDF95EDDC02C/Users/Public/Documents/VideoDatasets/CATER/max2actions/videos',
+        frame_root='/mnt/285EDDF95EDDC02C/Users/Public/Documents/VideoDatasets/CATER/max2actions/frame',
+        flow_root='/mnt/285EDDF95EDDC02C/Users/Public/Documents/VideoDatasets/CATER/max2actions/flow')

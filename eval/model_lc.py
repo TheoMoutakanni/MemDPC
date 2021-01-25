@@ -40,6 +40,8 @@ class LC(nn.Module):
         self._initialize_weights(self.agg_f)
         self._initialize_weights(self.agg_b)
 
+        self.lstm = nn.LSTM(self.param['feature_size']*2, self.param['feature_size']*2, num_layers=1, batch_first=True)
+
         self.final_bn = nn.BatchNorm1d(self.param['feature_size']*2)
         self.final_bn.weight.data.fill_(1)
         self.final_bn.bias.data.zero_()
@@ -70,8 +72,10 @@ class LC(nn.Module):
 
             context = torch.cat([context_forward, context_back], dim=-1) # B,N,C=2C
 
-        context = self.final_bn(context.transpose(-1,-2)).transpose(-1,-2) # [B,N,C] -> [B,C,N] -> BN() -> [B,N,C], because BN operates on id=1 channel.
-        output = self.final_fc(context).view(B, -1, self.num_class)
+
+        _, (context, _) = self.lstm(context)
+        context = self.final_bn(context.squeeze()) #.transpose(-1,-2)).transpose(-1,-2) # [B,N,C] -> [B,C,N] -> BN() -> [B,N,C], because BN operates on id=1 channel.
+        output = self.final_fc(context) #.view(B, -1, self.num_class)
 
         return output, context
 

@@ -11,8 +11,9 @@ from tensorboardX import SummaryWriter
 
 sys.path.append('../')
 sys.path.append('../memdpc/')
-from dataset import UCF101Dataset, HMDB51Dataset
+from dataset import UCF101Dataset, HMDB51Dataset, CATERDataset
 from model_lc import LC
+from model_timecycle import CycleTime
 import utils.augmentation as A 
 from utils.utils import AverageMeter, ConfusionMeter, save_checkpoint, \
 calc_topk_accuracy, denorm, calc_accuracy, neq_load_customized, Logger
@@ -28,7 +29,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--net', default='resnet18', type=str)
     parser.add_argument('--model', default='lc', type=str)
-    parser.add_argument('--dataset', default='ucf101', type=str)
+    parser.add_argument('--dataset', default='CATER_actions_present', type=str)
     parser.add_argument('--split', default=1, type=int)
     parser.add_argument('--seq_len', default=5, type=int)
     parser.add_argument('--num_seq', default=8, type=int)
@@ -71,6 +72,8 @@ def main(args):
 
     if args.dataset == 'ucf101': args.num_class = 101
     elif args.dataset == 'hmdb51': args.num_class = 51 
+    elif args.dataset == 'CATER_actions_present': args.num_class = 14
+    elif args.dataset == 'CATER_actions_order_uniq': args.num_class = 301
 
     ### classifier model ###
     if args.model == 'lc':
@@ -81,13 +84,23 @@ def main(args):
                    num_class=args.num_class,
                    dropout=args.dropout,
                    train_what=args.train_what)
+    elif args.model == 'timecycle':
+        model = CycleTime(sample_size=args.img_dim,
+                          num_seq=args.num_seq,
+                          seq_len=args.seq_len,
+                          num_class=args.num_class,
+                          dropout=args.dropout,
+                          train_what=args.train_what)
     else:
         raise ValueError('wrong model!')
 
     model.to(device)
     model = nn.DataParallel(model)
     model_without_dp = model.module 
-    criterion = nn.CrossEntropyLoss()
+    if args.dataset.split('_')[0] == 'CATER':
+        criterion = nn.BCEWithLogitsLoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
     
     ### optimizer ### 
     params = None
@@ -119,13 +132,18 @@ def main(args):
     
     ### scheduler ### 
     if args.dataset == 'hmdb51':
-        step =  args.schedule
+        step = args.schedule
         if step == []: step = [150,250]
         lr_lambda = lambda ep: MultiStepLR_Restart_Multiplier(ep, gamma=0.1, step=step, repeat=1)
     elif args.dataset == 'ucf101':
-        step =  args.schedule
+        step = args.schedule
         if step == []: step = [300, 400]
         lr_lambda = lambda ep: MultiStepLR_Restart_Multiplier(ep, gamma=0.1, step=step, repeat=1)
+    elif args.dataset.split('_')[0] == 'CATER':
+        step = args.schedule
+        if step == []: step = [150, 250]
+        lr_lambda = lambda ep: MultiStepLR_Restart_Multiplier(ep, gamma=0.1, step=step, repeat=1)
+
     lr_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     print('=> Using scheduler at {} epochs'.format(step))
 
@@ -258,6 +276,7 @@ def train_one_epoch(data_loader, model, criterion, optimizer, device, epoch, arg
 
     if args.train_what == 'last':
         model.eval()
+        model.module.lstm.train()
         model.module.final_bn.train()
         model.module.final_fc.train()
         print('[Warning] train model with eval mode, except final layer')
@@ -274,10 +293,16 @@ def train_one_epoch(data_loader, model, criterion, optimizer, device, epoch, arg
         B = input_seq.size(0)
         output, _ = model(input_seq)
 
-        [_, N, D] = output.size()
-        output = output.view(B*N, D)
-        target = target.repeat(1, N).view(-1)
-
+        #[_, N, D] = output.size()
+        #output = output.view(B*N, D)
+        #if len(target.shape) == 1:
+        #    target = target.repeat(1, N).view(-1)
+        #    metric = "Acc"
+        #else:
+        #    target = target.repeat(1, N).view(-1, D).float()
+        #    metric = "mAP"
+        target = target.float()
+        metric = "mAP"
         loss = criterion(output, target)
         acc = calc_accuracy(output, target)
 
@@ -294,10 +319,10 @@ def train_one_epoch(data_loader, model, criterion, optimizer, device, epoch, arg
         if idx % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Loss {loss.val:.4f} ({loss.local_avg:.4f})\t'
-                  'Acc: {acc.val:.4f} ({acc.local_avg:.4f})\t'
+                  '{metric}: {acc.val:.4f} ({acc.local_avg:.4f})\t'
                   'T-data:{dt.val:.2f} T-batch:{bt.val:.2f}\t'.format(
                    epoch, idx, len(data_loader),
-                   loss=losses, acc=accuracy, dt=data_time, bt=batch_time))
+                   loss=losses, acc=accuracy, dt=data_time, bt=batch_time,metric=metric))
      
             args.writer_train.add_scalar('local/loss', losses.val, args.iteration)
             args.writer_train.add_scalar('local/accuracy', accuracy.val, args.iteration)
@@ -323,9 +348,17 @@ def validate(data_loader, model, criterion, device, epoch, args):
             B = input_seq.size(0)
             output, _ = model(input_seq)
 
-            [_, N, D] = output.size()
-            output = output.view(B*N, D)
-            target = target.repeat(1, N).view(-1)
+            #[_, N, D] = output.size()
+            #output = output.view(B*N, D)
+
+            #if len(target.shape) == 1:
+            #    target = target.repeat(1, N).view(-1)
+            #    metric = "Acc"
+            #else:
+            #    target = target.repeat(1, N).view(-1, D).float()
+            #    metric = "mAP"
+            target = target.float()
+            metric = "mAP"
 
             loss = criterion(output, target)
             acc = calc_accuracy(output, target)
@@ -334,7 +367,7 @@ def validate(data_loader, model, criterion, device, epoch, args):
             accuracy.update(acc.item(), B)
 
     print('Loss {loss.avg:.4f}\t'
-          'Acc: {acc.avg:.4f} \t'.format(loss=losses, acc=accuracy))
+          '{metric}: {acc.avg:.4f} \t'.format(loss=losses, acc=accuracy, metric=metric))
     args.writer_val.add_scalar('global/loss', losses.avg, epoch)
     args.writer_val.add_scalar('global/accuracy', accuracy.avg, epoch)
 
@@ -403,7 +436,10 @@ def test(dataset, model, criterion, device, epoch, args):
                     input_seq = input_seq.squeeze(0) # squeeze the '1' batch dim
                     output, _ = model(input_seq)
 
-                    prob_mean = nn.functional.softmax(output, 2).mean(1).mean(0, keepdim=True)
+                    if len(target.shape) == 1 or target.shape[1] == 1:
+                        prob_mean = nn.functional.softmax(output, 2).mean(1).mean(0, keepdim=True)
+                    else:
+                        prob_mean = (torch.sigmoid(output).mean(1).mean(0, keepdim=True), target)
 
                     vname = vname[0]
                     if vname not in prob_dict.keys():
@@ -413,31 +449,52 @@ def test(dataset, model, criterion, device, epoch, args):
                 # show intermediate result
                 if (title == 'ten') and (flip_idx == 0) and (aug_idx == 5):
                     print('center-crop result:')
-                    acc_1 = summarize_probability(prob_dict, 
-                        data_loader.dataset.encode_action, 'center')
-                    args.logger.log('center-crop:')
-                    args.logger.log('test Epoch: [{0}]\t'
-                        'Mean: Acc@1: {acc[0].avg:.4f} Acc@5: {acc[1].avg:.4f}'
-                        .format(epoch, acc=acc_1))
+                    if len(target.shape) == 1 or target.shape[1] == 1:
+                        acc_1 = summarize_probability(prob_dict, 
+                            data_loader.dataset.encode_action, 'center')
+                        args.logger.log('center-crop:')
+                        args.logger.log('test Epoch: [{0}]\t'
+                            'Mean: Acc@1: {acc[0].avg:.4f} Acc@5: {acc[1].avg:.4f}'
+                            .format(epoch, acc=acc_1))
+                    else:
+                        acc_1 = summarize_multiprobability(prob_dict, 'center')
+                        args.logger.log('center-crop:')
+                        args.logger.log('test Epoch: [{0}]\t'
+                            'Mean: mAP: {acc.avg:.4f}'
+                            .format(epoch, acc=acc_1))
 
             # show intermediate result
             if (title == 'ten') and (flip_idx == 0):
                 print('five-crop result:')
-                acc_5 = summarize_probability(prob_dict, 
-                        data_loader.dataset.encode_action, 'five')
-                args.logger.log('five-crop:')
-                args.logger.log('test Epoch: [{0}]\t'
-                    'Mean: Acc@1: {acc[0].avg:.4f} Acc@5: {acc[1].avg:.4f}'
-                    .format(epoch, acc=acc_5))
+                if len(target.shape) == 1 or target.shape[1] == 1:
+                    acc_5 = summarize_probability(prob_dict, 
+                            data_loader.dataset.encode_action, 'five')
+                    args.logger.log('five-crop:')
+                    args.logger.log('test Epoch: [{0}]\t'
+                        'Mean: Acc@1: {acc[0].avg:.4f} Acc@5: {acc[1].avg:.4f}'
+                        .format(epoch, acc=acc_5))
+                else:
+                    acc_5 = summarize_multiprobability(prob_dict, 'five')
+                    args.logger.log('five-crop:')
+                    args.logger.log('test Epoch: [{0}]\t'
+                        'Mean: mAP: {acc.avg:.4f}'
+                        .format(epoch, acc=acc_5))
 
         # show final result
         print('%s-crop result:' % title)
-        acc_final = summarize_probability(prob_dict, 
-            data_loader.dataset.encode_action, 'ten')
-        args.logger.log('%s-crop:' % title)
-        args.logger.log('test Epoch: [{0}]\t'
-                        'Mean: Acc@1: {acc[0].avg:.4f} Acc@5: {acc[1].avg:.4f}'
-                        .format(epoch, acc=acc_final))
+        if len(target.shape) == 1 or target.shape[1] == 1:
+            acc_final = summarize_probability(prob_dict, 
+                data_loader.dataset.encode_action, 'ten')
+            args.logger.log('%s-crop:' % title)
+            args.logger.log('test Epoch: [{0}]\t'
+                            'Mean: Acc@1: {acc[0].avg:.4f} Acc@5: {acc[1].avg:.4f}'
+                            .format(epoch, acc=acc_final))
+        else:
+            acc_final = summarize_multiprobability(prob_dict, 'ten')
+            args.logger.log('%s-crop:' % title)
+            args.logger.log('test Epoch: [{0}]\t'
+                            'Mean: mAP: {acc.avg:.4f}'
+                            .format(epoch, acc=acc_final))
         sys.exit(0)
 
 
@@ -465,6 +522,29 @@ def summarize_probability(prob_dict, action_to_idx, title):
     return acc
 
 
+def summarize_multiprobability(prob_dict, title):
+    mAP = AverageMeter()
+    stat = {}
+    probs = []
+    targets = []
+    for vname, item in tqdm(prob_dict.items(), total=len(prob_dict)):
+        mean_prob, target = zip(*item)
+        mean_prob = torch.stack(mean_prob, 0).mean(0)
+        target = target[0]
+        probs.append(mean_prob)
+        targets.append(target)
+    mean_ap = calc_topk_accuracy(torch.cat(probs), torch.cat(targets)).item()
+    # stat[vname] = {'mean_prob': mean_prob.tolist()}
+    mAP.update(mean_ap, 1)
+
+    print('Mean: mAP: {mAP.avg:.4f}'.format(mAP=mAP))
+
+    with open(os.path.join(os.path.dirname(args.test), 
+        '%s-prob-%s.json' % (os.path.basename(args.test), title)), 'w') as fp:
+        json.dump(stat, fp)
+    return mAP
+
+
 def get_data(transform, mode='train'):
     print('Loading data for "%s" ...' % mode)
     global dataset
@@ -483,6 +563,15 @@ def get_data(transform, mode='train'):
                          num_seq=args.num_seq,
                          downsample=args.ds,
                          which_split=args.split,
+                         return_label=True)
+    elif args.dataset.split('_')[0] == 'CATER':
+        dataset = CATERDataset(mode=mode,
+                         task=args.dataset.split('_',1)[1],
+                         transform=transform,
+                         seq_len=args.seq_len,
+                         num_seq=args.num_seq,
+                         downsample=args.ds,
+                         #which_split=args.split,
                          return_label=True)
     else:
         raise ValueError('dataset not supported')

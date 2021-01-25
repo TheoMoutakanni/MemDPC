@@ -11,6 +11,32 @@ from collections import deque
 from tqdm import tqdm 
 from torchvision import transforms
 
+import sys
+ap_impl_path = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                            '../../CATER-SSL/external_lib/average-precision/python/')  # noQA
+sys.path.insert(0, ap_impl_path)
+from ap import compute_multiple_aps
+
+
+class HiddenPrints:
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout.close()
+        sys.stdout = self._original_stdout
+
+
+def blockPrint(func):
+    def func_wrapper(*args, **kwargs):
+        with HiddenPrints():
+            value = func(*args, **kwargs)
+        return value
+
+    return func_wrapper
+
+
 def save_checkpoint(state, is_best=0, gap=1, filename='models/checkpoint.pth.tar', keep_all=False):
     torch.save(state, filename)
     last_epoch_path = os.path.join(os.path.dirname(filename),
@@ -55,12 +81,14 @@ def calc_topk_accuracy(output, target, topk=(1,)):
     Given predicted and ground truth labels, 
     calculate top-k accuracies.
     '''
+    if len(target.shape) > 1 and target.shape[1] != 1:
+        return compute_map(target.detach().cpu(), torch.sigmoid(output).detach().cpu())
     maxk = max(topk)
     batch_size = target.size(0)
 
     _, pred = output.topk(maxk, 1, True, True)
     pred = pred.t()
-    correct = pred.eq(target.view(1, -1).expand_as(pred))
+    correct = pred.eq(target.view(1, -1).expand_as(pred)).contiguous()
 
     res = []
     for k in topk:
@@ -68,11 +96,27 @@ def calc_topk_accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(1 / batch_size))
     return res
 
+
+@blockPrint
+def compute_map(labels, preds):
+    ap = compute_multiple_aps(labels, preds)
+    map = np.mean([el for el in ap if el >= 0])
+    return map
+
+
 def calc_accuracy(output, target):
     '''output: (B, N); target: (B)'''
-    target = target.squeeze()
-    _, pred = torch.max(output, 1)
-    return torch.mean((pred == target).float())
+    if len(target.shape) == 1 or target.shape[1] == 1:
+        target = target.squeeze()
+        _, pred = torch.max(output, 1)
+        return torch.mean((pred == target).float())
+    else:
+        output = torch.sigmoid(output)
+        print(torch.mean((((output > 0.5).float() - (target > 0.5).float())[target > 0.5]).float()))
+        #return torch.mean((((output > 0.5).float() - (target > 0.5).float()).sum(1) == 0).float())
+        mAP = compute_map(target.detach().cpu(), output.detach().cpu())
+        return torch.FloatTensor([mAP])
+    
 
 def denorm(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]):
     assert len(mean)==len(std)==3

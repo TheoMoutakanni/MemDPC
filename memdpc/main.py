@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 plt.switch_backend('agg')
 
 sys.path.append('../')
-from dataset import K400Dataset, UCF101Dataset
+from dataset import K400Dataset, UCF101Dataset, CATERDataset
 from model import MemDPC_BD
 
 import utils.augmentation as A
@@ -30,7 +30,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--net', default='resnet18', type=str)
     parser.add_argument('--model', default='memdpc', type=str)
-    parser.add_argument('--dataset', default='ucf101', type=str)
+    parser.add_argument('--dataset', default='CATER_actions_present', type=str)
     parser.add_argument('--seq_len', default=5, type=int, help='number of frames in each video block')
     parser.add_argument('--num_seq', default=8, type=int, help='number of video blocks')
     parser.add_argument('--pred_step', default=3, type=int)
@@ -285,6 +285,13 @@ def get_data(transform, mode='train'):
                               downsample=args.ds)
     elif args.dataset == 'ucf101':
         dataset = UCF101Dataset(mode=mode,
+                         transform=transform,
+                         seq_len=args.seq_len,
+                         num_seq=args.num_seq,
+                         downsample=args.ds)
+    elif args.dataset.split('_')[0] == 'CATER':
+        dataset = CATERDataset(mode=mode,
+                         task=args.dataset.split('_',1)[1],
                          transform=transform,
                          seq_len=args.seq_len,
                          num_seq=args.num_seq,
